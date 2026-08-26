@@ -1,10 +1,12 @@
 node_modules/
 www/
 dist/
+*.tsbuildinfo
 android/.gradle/
 android/app/build/
 android/build/
 android/capacitor-cordova-android-plugins/
+android/app/src/main/assets/public/
 android/.idea/
 *.iml
 .DS_Store
