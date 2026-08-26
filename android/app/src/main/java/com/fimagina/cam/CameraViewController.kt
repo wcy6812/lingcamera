@@ -179,7 +179,8 @@ class CameraViewController(
         val surf = vf.holder.surface
         if (!surf.isValid) return
         // 按传感器能力选择 JPEG 尺寸（≤4096 满足大多数机型，避免超限导致会话失败）
-        val map = device.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val chars = manager.getCameraCharacteristics(device.id)
+        val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         val sizes: Array<android.util.Size> = map?.getOutputSizes(ImageFormat.JPEG) ?: emptyArray<android.util.Size>()
         val pick = sizes.firstOrNull { it.width <= 4096 && it.height <= 4096 } ?: sizes.firstOrNull() ?: return
         val reader = ImageReader.newInstance(pick.width, pick.height, ImageFormat.JPEG, 2)
