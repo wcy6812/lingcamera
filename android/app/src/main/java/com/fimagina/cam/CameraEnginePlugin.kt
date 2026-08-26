@@ -85,8 +85,7 @@ class CameraEnginePlugin : Plugin() {
     private fun requestStorageThenStart(call: PluginCall) {
         val alias = storageAlias()
         if (alias == null || hasPermission(alias)) {
-            startPreview()
-            call.resolve(JSObject().put("storageGranted", hasStorageGranted()))
+            startPreviewAndWait(call)
         } else {
             requestPermissionForAlias(alias, call, "storagePermsCallback")
         }
@@ -95,8 +94,68 @@ class CameraEnginePlugin : Plugin() {
     @PermissionCallback
     private fun storagePermsCallback(call: PluginCall) {
         // 存储被拒：相机照常可用，仅提示无法写入相册
-        startPreview()
-        call.resolve(JSObject().put("storageGranted", hasStorageGranted()))
+        startPreviewAndWait(call)
+    }
+
+    private var pendingOpen: PluginCall? = null
+
+    /** 等相机会话真正就绪后再 resolve；打开失败则 reject，让前端区分处理 */
+    private fun startPreviewAndWait(call: PluginCall) {
+        if (!hasCameraPermission()) {
+            call.reject("相机权限被拒绝或未授予。", "CAMERA_PERMISSION_DENIED")
+            return
+        }
+        val ctl = ensureController()
+        if (ctl == null) {
+            call.reject("取景器初始化失败", "CAMERA_OPEN_FAILED")
+            return
+        }
+        pendingOpen = call
+        var settled = false
+        ctl.onReady = {
+            if (!settled) {
+                settled = true
+                resolvePending(JSObject().put("storageGranted", hasStorageGranted()))
+            }
+        }
+        ctl.start { msg ->
+            if (!settled) {
+                settled = true
+                rejectPending(msg, "CAMERA_OPEN_FAILED")
+            }
+        }
+        // 兜底：3.5s 未就绪也返回，避免前端永久等待
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (!settled) {
+                settled = true
+                resolvePending(JSObject().put("storageGranted", hasStorageGranted()))
+            }
+        }, 3500)
+    }
+
+    private fun ensureController(): CameraViewController? {
+        if (controller == null) {
+            val act = activity ?: return null
+            val webView = bridge?.webView
+            if (webView !is WebView) return null
+            val host = webView.parent as? ViewGroup ?: return null
+            controller = CameraViewController(act, context, host)
+        }
+        return controller
+    }
+
+    private fun resolvePending(obj: JSObject) {
+        pendingOpen?.let { c ->
+            pendingOpen = null
+            if (!c.isSaved) c.resolve(obj)
+        }
+    }
+
+    private fun rejectPending(msg: String, code: String) {
+        pendingOpen?.let { c ->
+            pendingOpen = null
+            if (!c.isSaved) c.reject(msg, code)
+        }
     }
 
     @PluginMethod
@@ -131,6 +190,7 @@ class CameraEnginePlugin : Plugin() {
 
     @PluginMethod
     fun stopPreview(call: PluginCall) {
+        pendingOpen = null
         controller?.stop()
         controller = null
         call.resolve()
@@ -227,22 +287,6 @@ class CameraEnginePlugin : Plugin() {
             }
         } catch (e: Exception) {
             call.reject("保存失败: ${e.message}")
-        }
-    }
-
-    private fun startPreview() {
-        if (!hasCameraPermission()) return
-        if (controller == null) {
-            val activity = activity ?: return
-            val webView = bridge?.webView
-            if (webView !is WebView) return
-            val host = webView.parent as? ViewGroup ?: return
-            controller = CameraViewController(activity, context, host)
-        }
-        controller?.start { err ->
-            if (err.isNotEmpty()) {
-                android.util.Log.w("CameraEngine", err)
-            }
         }
     }
 }

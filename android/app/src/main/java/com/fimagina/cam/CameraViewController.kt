@@ -48,18 +48,30 @@ class CameraViewController(
     private var imageReader: ImageReader? = null
 
     private var ratio: Float = 1.5f // 默认 3:2
+    private var opening = false // 防止 openCamera 被并发/重复调用
+
+    /** 打开失败统一回调（相机权限、设备错误等） */
+    private var errorListener: ((String) -> Unit)? = null
+
+    /** 取景会话就绪回调（预览已开始），供插件在此时 resolve */
+    var onReady: (() -> Unit)? = null
 
     // ---- 生命周期 ----
     fun start(onError: (String) -> Unit) {
+        errorListener = onError
         val granted = ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
         if (!granted) {
-            onError("CAMERA 权限未授权")
+            notifyError("CAMERA 权限未授权")
             return
         }
         ensureThread()
+        // 打开动作统一走 ensureViewfinder -> openIfReady，避免与回调重复 openCamera
         ensureViewfinder()
-        openCamera(onError)
+    }
+
+    private fun notifyError(msg: String) {
+        mainHandler.post { errorListener?.invoke(msg) }
     }
 
     fun stop() {
@@ -111,27 +123,45 @@ class CameraViewController(
     private fun openIfReady() {
         val vf = previewSurface ?: return
         if (!vf.holder.isCreating && !vf.holder.surface.isValid) return
-        if (cameraDevice == null) openCamera { /* 失败静默，等 start 处回调 */ }
-        else createPreviewSession()
+        if (cameraDevice != null) {
+            createPreviewSession()
+            return
+        }
+        openCamera()
     }
 
     // ---- 打开/关闭相机 ----
-    private fun openCamera(onError: (String) -> Unit) {
-        val id = pickBackCamera() ?: run { onError("未找到后置摄像头"); return }
+    @Synchronized
+    private fun openCamera() {
+        if (opening || cameraDevice != null) return
+        opening = true
+        val id = pickBackCamera() ?: run {
+            opening = false
+            notifyError("未找到后置摄像头")
+            return
+        }
         try {
             manager.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
+                    opening = false
                     cameraDevice = camera
                     createPreviewSession()
                 }
-                override fun onDisconnected(camera: CameraDevice) { camera.close(); cameraDevice = null }
+                override fun onDisconnected(camera: CameraDevice) {
+                    opening = false
+                    camera.close()
+                    cameraDevice = null
+                }
                 override fun onError(camera: CameraDevice, error: Int) {
-                    camera.close(); cameraDevice = null
-                    mainHandler.post { onError("相机打开失败 err=$error") }
+                    opening = false
+                    camera.close()
+                    cameraDevice = null
+                    notifyError("相机打开失败（err=$error）")
                 }
             }, cameraHandler)
         } catch (e: Exception) {
-            mainHandler.post { onError("无法打开相机: ${e.message}") }
+            opening = false
+            notifyError("无法打开相机: ${e.message}")
         }
     }
 
@@ -148,7 +178,12 @@ class CameraViewController(
         val vf = previewSurface ?: return
         val surf = vf.holder.surface
         if (!surf.isValid) return
-        val reader = ImageReader.newInstance(5120, 3840, ImageFormat.JPEG, 2)
+        // 按传感器能力选择 JPEG 尺寸（≤4096 满足大多数机型，避免超限导致会话失败）
+        val sizes = device.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ?.getOutputSizes(ImageFormat.JPEG)
+            ?: emptyArray()
+        val pick = sizes.firstOrNull { it.width <= 4096 && it.height <= 4096 } ?: sizes.firstOrNull() ?: return
+        val reader = ImageReader.newInstance(pick.width, pick.height, ImageFormat.JPEG, 2)
         imageReader = reader
 
         try {
@@ -163,6 +198,7 @@ class CameraViewController(
                             set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
                         }
                         session.setRepeatingRequest(b.build(), null, cameraHandler)
+                        mainHandler.post { onReady?.invoke() }
                     }
                     override fun onConfigureFailed(session: CameraCaptureSession) = Unit
                 },

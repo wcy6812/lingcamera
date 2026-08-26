@@ -15,6 +15,8 @@ const errored = ref('')
 const ready = ref(false)
 /** 相机权限被拒，显示去设置引导 */
 const permDenied = ref(false)
+/** 相机设备打开失败（权限正常），可重试 */
+const cameraOpenFailed = ref(false)
 /** 存储权限未授予（照片无法保存相册） */
 const storageWarn = ref('')
 
@@ -64,6 +66,9 @@ async function init() {
     if (code === 'CAMERA_PERMISSION_DENIED') {
       permDenied.value = true
       errored.value = '相机权限被拒绝，无法使用取景器'
+    } else if (code === 'CAMERA_OPEN_FAILED') {
+      cameraOpenFailed.value = true
+      errored.value = '相机打开失败，请重试或检查设备'
     } else if (code === 'STORAGE_PERMISSION_DENIED') {
       storageWarn.value = '未授予存储权限，照片将无法保存到相册'
       ready.value = true
@@ -73,9 +78,27 @@ async function init() {
   }
 }
 
+/** 重新请求相机（重试 / 从系统设置返回后自动恢复） */
+async function retryInit() {
+  if (capturing.value) return
+  permDenied.value = false
+  cameraOpenFailed.value = false
+  errored.value = ''
+  await init()
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (
+    document.visibilityState === 'visible' &&
+    isNativeClient &&
+    (permDenied.value || cameraOpenFailed.value)
+  ) {
+    retryInit()
+  }
+})
+
 async function openSystemSettings() {
   try {
-    permDenied.value = false
     await nativeCamera.openSettings()
   } catch {
     /* 打开失败静默 */
@@ -281,6 +304,16 @@ onBeforeUnmount(() => {
       <div class="perm-icon">✕</div>
       <p>相机权限被拒绝，无法使用取景器</p>
       <button class="btn close" @click="openSystemSettings">去设置开启</button>
+    </div>
+
+    <!-- 相机设备打开失败（权限正常） -->
+    <div v-if="cameraOpenFailed" class="perm-screen" @click.stop>
+      <div class="perm-icon warn">!</div>
+      <p>相机打开失败，请重试</p>
+      <div class="preview-actions">
+        <button class="btn ghost" @click="retryInit">重试</button>
+        <button class="btn close" @click="openSystemSettings">去设置</button>
+      </div>
     </div>
 
     <!-- 存储权限提示 -->
@@ -598,6 +631,10 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+.perm-icon.warn {
+  border-color: #ffd88f;
+  color: #ffd88f;
 }
 .storage-warn {
   position: absolute;
