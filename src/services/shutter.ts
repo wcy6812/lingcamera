@@ -13,6 +13,10 @@ export interface ShotResult {
   height: number
   ratio: number
   lutId: string
+  /** 原生端是否成功写入相册（undefined = 非原生/未尝试） */
+  saved?: boolean
+  /** 保存失败原因 code（如 STORAGE_PERMISSION_DENIED） */
+  saveError?: string
 }
 
 /**
@@ -54,17 +58,29 @@ export async function takeShot(video: HTMLVideoElement | null, settings: Capture
   ctx.putImageData(new ImageData(graded, cropped.width, cropped.height), 0, 0)
 
   // 原生端写回相册
+  let saved: boolean | undefined
+  let saveError: string | undefined
   if (isNative()) {
     try {
       const blob = await canvasToBlob(cropped, 'image/jpeg', 0.92)
       const b64 = await blobToBase64(blob)
       await nativeCamera.saveToGallery(b64.split(',')[1] ?? b64, shotName())
-    } catch {
-      /* 保存失败不阻断成片展示 */
+      saved = true
+    } catch (e) {
+      saved = false
+      saveError = (e as { code?: string } | null)?.code ?? (e instanceof Error ? e.message : String(e))
     }
   }
 
-  return { canvas: cropped, width: cropped.width, height: cropped.height, ratio: aspect.ratio, lutId: settings.lutId }
+  return {
+    canvas: cropped,
+    width: cropped.width,
+    height: cropped.height,
+    ratio: aspect.ratio,
+    lutId: settings.lutId,
+    saved,
+    saveError
+  }
 }
 
 function shotName(): string {

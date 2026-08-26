@@ -1,6 +1,10 @@
 package com.fimagina.cam
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.view.ViewGroup
 import android.webkit.WebView
 import com.getcapacitor.JSObject
@@ -14,10 +18,17 @@ import com.getcapacitor.annotation.PermissionCallback
 /**
  * 原生相机插件：取景 + 曝光包围连拍。
  *
+ * 权限链：先请求相机，通过后请求存储（写入相册需要）。
+ *   - API <= 28  : WRITE_EXTERNAL_STORAGE
+ *   - API >= 33  : READ_MEDIA_IMAGES
+ *   - API 29-32  : MediaStore 写入无需存储权限
+ * 相机被拒 -> reject(code = "CAMERA_PERMISSION_DENIED")，前端可引导用户去系统设置开启。
+ *
  * 桥接方法：
- *   requestCamera()                                   请求权限并启动原生取景
- *   stopPreview()                                     停止取景并释放相机
- *   setRatio({ ratio })                               更新取景窗口尺寸
+ *   requestCamera() -> { storageGranted }              请求权限并启动原生取景
+ *   openSettings()                                     打开应用系统设置页
+ *   stopPreview()                                      停止取景并释放相机
+ *   setRatio({ ratio })                                更新取景窗口尺寸
  *   capture({ quality })                          -> { base64 }
  *   captureBurst({ frames, evStep, quality })     -> { base64s, evs }
  *   pick()                                        -> { uri, base64|null }  系统相册选图
@@ -26,7 +37,15 @@ import com.getcapacitor.annotation.PermissionCallback
 @CapacitorPlugin(
     name = "CameraEngine",
     permissions = [
-        Permission(alias = "camera", strings = [Manifest.permission.CAMERA])
+        Permission(alias = "camera", strings = [Manifest.permission.CAMERA]),
+        Permission(
+            alias = "storageLegacy",
+            strings = [Manifest.permission.WRITE_EXTERNAL_STORAGE]
+        ),
+        Permission(
+            alias = "storage33",
+            strings = [Manifest.permission.READ_MEDIA_IMAGES]
+        )
     ]
 )
 class CameraEnginePlugin : Plugin() {
@@ -39,25 +58,76 @@ class CameraEnginePlugin : Plugin() {
         super.handleOnDestroy()
     }
 
-    @PermissionCallback
-    private fun cameraPermsCallback(call: PluginCall) {
-        if (hasPermission("camera")) {
-            startPreview()
-            call.resolve()
-        } else {
-            call.reject("相机权限被拒绝")
-        }
-    }
+    // ---- 权限链：相机 -> 存储 -> 启动取景 ----
 
     @PluginMethod
     fun requestCamera(call: PluginCall) {
         if (hasPermission("camera")) {
-            startPreview()
-            call.resolve()
+            requestStorageThenStart(call)
         } else {
             requestPermissionForAlias("camera", call, "cameraPermsCallback")
         }
     }
+
+    @PermissionCallback
+    private fun cameraPermsCallback(call: PluginCall) {
+        if (hasPermission("camera")) {
+            requestStorageThenStart(call)
+        } else {
+            call.reject(
+                "相机权限被拒绝。请点击「去设置」手动开启相机权限后再试。",
+                "CAMERA_PERMISSION_DENIED"
+            )
+        }
+    }
+
+    /** 相机已授权 -> 继续请求存储（保存照片用），存储被拒不阻断取景 */
+    private fun requestStorageThenStart(call: PluginCall) {
+        val alias = storageAlias()
+        if (alias == null || hasPermission(alias)) {
+            startPreview()
+            call.resolve(JSObject().put("storageGranted", hasStorageGranted()))
+        } else {
+            requestPermissionForAlias(alias, call, "storagePermsCallback")
+        }
+    }
+
+    @PermissionCallback
+    private fun storagePermsCallback(call: PluginCall) {
+        // 存储被拒：相机照常可用，仅提示无法写入相册
+        startPreview()
+        call.resolve(JSObject().put("storageGranted", hasStorageGranted()))
+    }
+
+    @PluginMethod
+    fun openSettings(call: PluginCall) {
+        val act = activity
+        if (act == null) {
+            call.reject("当前 Activity 不可用")
+            return
+        }
+        val intent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:" + act.packageName)
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        act.startActivity(intent)
+        call.resolve()
+    }
+
+    private fun storageAlias(): String? = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> "storage33" // READ_MEDIA_IMAGES
+        Build.VERSION.SDK_INT <= Build.VERSION_CODES.P -> "storageLegacy"   // WRITE_EXTERNAL_STORAGE
+        else -> null // API 29-32 MediaStore 写入无需权限
+    }
+
+    private fun hasStorageGranted(): Boolean {
+        val alias = storageAlias() ?: return true
+        return hasPermission(alias)
+    }
+
+    private fun hasCameraPermission(): Boolean = hasPermission("camera")
+
+    // ---- 相机控制 ----
 
     @PluginMethod
     fun stopPreview(call: PluginCall) {
@@ -123,6 +193,13 @@ class CameraEnginePlugin : Plugin() {
 
     @PluginMethod
     fun saveToGallery(call: PluginCall) {
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P && !hasPermission("storageLegacy")) {
+            call.reject(
+                "没有文件权限，无法保存照片。请先授权存储权限或到系统设置开启。",
+                "STORAGE_PERMISSION_DENIED"
+            )
+            return
+        }
         val data = call.getString("data") ?: run { call.reject("缺少 data"); return }
         val name = call.getString("name") ?: "fimagina.jpg"
         try {
@@ -154,6 +231,7 @@ class CameraEnginePlugin : Plugin() {
     }
 
     private fun startPreview() {
+        if (!hasCameraPermission()) return
         if (controller == null) {
             val activity = activity ?: return
             val webView = bridge?.webView

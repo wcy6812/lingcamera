@@ -13,7 +13,8 @@ import { Capacitor } from '@capacitor/core'
  */
 
 interface CameraEnginePlugin {
-  requestCamera(): Promise<void>
+  requestCamera(): Promise<{ storageGranted: boolean }>
+  openSettings(): Promise<void>
   stopPreview(): Promise<void>
   setRatio(opts: { ratio: number }): Promise<void>
   capture(opts: { quality: number }): Promise<{ base64: string }>
@@ -38,6 +39,7 @@ function plugin(): CameraEnginePlugin {
 export const nativeCamera = {
   isNative,
   requestCamera: async () => plugin().requestCamera(),
+  openSettings: async () => plugin().openSettings(),
   stopPreview: async () => plugin().stopPreview(),
   setRatio: async (ratio: number) => plugin().setRatio({ ratio }),
   capture: async (quality = 92) => plugin().capture({ quality }),
