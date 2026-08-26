@@ -127,7 +127,7 @@ class CameraEnginePlugin : Plugin() {
         val name = call.getString("name") ?: "fimagina.jpg"
         try {
             val bytes = android.util.Base64.decode(data, android.util.Base64.DEFAULT)
-            val dir = androidx.core.content.ContextCompat.getExternalFilesDir(context, null)
+            val dir = context.getExternalFilesDir(null)
                 ?: context.cacheDir
             val file = java.io.File(dir, name)
             file.writeBytes(bytes)

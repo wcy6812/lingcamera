@@ -197,7 +197,7 @@ class CameraViewController(
             device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(reader.surface)
                 set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-                set(CaptureRequest.JPEG_QUALITY, quality.coerceIn(1, 100))
+                set(CaptureRequest.JPEG_QUALITY, quality.coerceIn(1, 100).toByte())
                 set(CaptureRequest.JPEG_ORIENTATION, 90)
                 if (ev != 0f) {
                     val units = (ev / step).toInt().coerceIn(compRange.lower, compRange.upper)
