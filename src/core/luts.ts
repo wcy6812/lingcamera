@@ -1,4 +1,4 @@
-import type { LutParams } from './types'
+import type { ImportedLut, LutParams } from './types'
 
 /**
  * 胶片色调预设（LUT‑style grading）。
@@ -93,8 +93,24 @@ export const LUT_PRESETS: LutParams[] = [
   }
 ]
 
+/** 用户动态导入的自定义 LUT（运行时注册，可持久化到 localStorage） */
+const CUSTOM_LUTS: LutParams[] = []
+
+export function registerLut(lut: LutParams): string {
+  if (!CUSTOM_LUTS.some((l) => l.id === lut.id)) CUSTOM_LUTS.push(lut)
+  return lut.id
+}
+
+export function getAllLuts(): LutParams[] {
+  return [...LUT_PRESETS, ...CUSTOM_LUTS]
+}
+
+export function getCustomLuts(): LutParams[] {
+  return CUSTOM_LUTS.slice()
+}
+
 export function getLut(id: string): LutParams {
-  return LUT_PRESETS.find((l) => l.id === id) ?? LUT_PRESETS[0]
+  return CUSTOM_LUTS.find((l) => l.id === id) ?? LUT_PRESETS.find((l) => l.id === id) ?? LUT_PRESETS[0]
 }
 
 /** 根据 对比度/提灰/高光压缩 合成一条 0..255 的色调曲线 */
@@ -135,6 +151,30 @@ const TONE_CURVE = buildCurve(1.0, 0, 0)
  */
 export function gradePixel(rgb: [number, number, number], lut: LutParams, seed: number): void {
   let [r, g, b] = rgb
+
+  // 0) 导入的 .cube LUT：直接查表（三线性 / 1D 线性），再叠加颗粒
+  const cube = lut.cubeLut
+  if (cube) {
+    r = toDomain01(r, cube.domainMin[0], cube.domainMax[0])
+    g = toDomain01(g, cube.domainMin[1], cube.domainMax[1])
+    b = toDomain01(b, cube.domainMin[2], cube.domainMax[2])
+    const out = cube.type === '1d' ? applyCube1d(cube, r, g, b) : applyCube3d(cube, r, g, b)
+    r = out[0]
+    g = out[1]
+    b = out[2]
+    const grain = lut.grain ?? 0
+    if (grain > 0) {
+      const u = fract(Math.sin(seed * 12.9898) * 43758.5453)
+      const noise = (u * 2 - 1) * grain * 38
+      r += noise
+      g += noise
+      b += noise
+    }
+    rgb[0] = clampPix(r)
+    rgb[1] = clampPix(g)
+    rgb[2] = clampPix(b)
+    return
+  }
 
   // 1) 白平衡（色温）：负=冷（蓝增），正=暖（红增）
   const temp = lut.temperature
@@ -263,4 +303,179 @@ export function gradeImage(data: Uint8ClampedArray, w: number, h: number, lut: L
 /** 把某预设转为可保存/导出的轻量描述（用户可随时预览效果名） */
 export function describeLut(lut: LutParams): string {
   return `${lut.name} (对比${lut.contrast >= 1 ? '+' : ''}${Math.round((lut.contrast - 1) * 100)} · 饱和${lut.saturation >= 1 ? '+' : ''}${Math.round((lut.saturation - 1) * 100)} ● ${(lut.grain ?? 0) > 0 ? '颗粒' : ''}${(lut.vignette ?? 0) > 0 ? '暗角' : ''})`
+}
+
+// ==================== .cube LUT 解析与查表 ====================
+
+/** 把 0..255 像素值重映射到 LUT 的 domain 区间（domain 默认 0..1） */
+function toDomain01(v: number, min: number, max: number): number {
+  if (min === 0 && max === 1) return v
+  const t = v / 255
+  return t * (max - min) + min
+}
+
+/** 3D LUT 三线性插值。data 顺序：R 外层 → G → B 内层，每点 3 值（0..255） */
+export function applyCube3d(cube: ImportedLut, cr: number, cg: number, cb: number): [number, number, number] {
+  const size = cube.size
+  const data = cube.data
+  const n = size - 1
+  const u = clamp(cr / 255) * n
+  const v = clamp(cg / 255) * n
+  const w = clamp(cb / 255) * n
+  const u0 = Math.floor(u)
+  const v0 = Math.floor(v)
+  const w0 = Math.floor(w)
+  const u1 = Math.min(u0 + 1, n)
+  const v1 = Math.min(v0 + 1, n)
+  const w1 = Math.min(w0 + 1, n)
+  const fu = u - u0
+  const fv = v - v0
+  const fw = w - w0
+
+  const at = (x: number, y: number, z: number, ch: number) => data[(((x * size) + y) * size + z) * 3 + ch]
+
+  // 8 个角点
+  const c000 = [at(u0, v0, w0, 0), at(u0, v0, w0, 1), at(u0, v0, w0, 2)]
+  const c100 = [at(u1, v0, w0, 0), at(u1, v0, w0, 1), at(u1, v0, w0, 2)]
+  const c010 = [at(u0, v1, w0, 0), at(u0, v1, w0, 1), at(u0, v1, w0, 2)]
+  const c110 = [at(u1, v1, w0, 0), at(u1, v1, w0, 1), at(u1, v1, w0, 2)]
+  const c001 = [at(u0, v0, w1, 0), at(u0, v0, w1, 1), at(u0, v0, w1, 2)]
+  const c101 = [at(u1, v0, w1, 0), at(u1, v0, w1, 1), at(u1, v0, w1, 2)]
+  const c011 = [at(u0, v1, w1, 0), at(u0, v1, w1, 1), at(u0, v1, w1, 2)]
+  const c111 = [at(u1, v1, w1, 0), at(u1, v1, w1, 1), at(u1, v1, w1, 2)]
+
+  const out: [number, number, number] = [0, 0, 0]
+  for (let ch = 0; ch < 3; ch++) {
+    const x00 = c000[ch] * (1 - fu) + c100[ch] * fu
+    const x10 = c010[ch] * (1 - fu) + c110[ch] * fu
+    const x01 = c001[ch] * (1 - fu) + c101[ch] * fu
+    const x11 = c011[ch] * (1 - fu) + c111[ch] * fu
+    const y0 = x00 * (1 - fv) + x10 * fv
+    const y1 = x01 * (1 - fv) + x11 * fv
+    out[ch] = y0 * (1 - fw) + y1 * fw
+  }
+  return out
+}
+
+/** 1D LUT：每个通道一条曲线，独立线性插值 */
+export function applyCube1d(cube: ImportedLut, cr: number, cg: number, cb: number): [number, number, number] {
+  const size = cube.size
+  const data = cube.data
+  const n = size - 1
+
+  const sample = (ch: number, inp: number): number => {
+    const pos = clamp(inp / 255) * n
+    const i0 = Math.floor(pos)
+    const i1 = Math.min(i0 + 1, n)
+    const f = pos - i0
+    return data[i0 * 3 + ch] * (1 - f) + data[i1 * 3 + ch] * f
+  }
+
+  return [sample(0, cr), sample(1, cg), sample(2, cb)]
+}
+
+/**
+ * 解析 Adobe .cube LUT 文本，返回可作为滤镜使用的 LutParams。
+ * 同时支持 LUT_3D_SIZE（3D）与 LUT_1D_SIZE（1D）。
+ */
+export function parseCubeLut(text: string, fallbackName: string): LutParams {
+  let size3d = 0
+  let size1d = 0
+  let title = fallbackName.trim() || '自定义 LUT'
+  const domainMin: [number, number, number] = [0, 0, 0]
+  const domainMax: [number, number, number] = [1, 1, 1]
+  let inputLine = -1
+  const values: number[] = []
+
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#')) continue
+    const up = line.toUpperCase()
+    if (up.startsWith('TITLE')) {
+      const m = line.match(/"([^"]*)"/)
+      if (m) title = m[1].trim()
+      continue
+    }
+    if (up.startsWith('LUT_3D_SIZE')) {
+      size3d = parseInt(line.split(/\s+/)[1] ?? '', 10)
+      if (isNaN(size3d)) size3d = 0
+      continue
+    }
+    if (up.startsWith('LUT_1D_SIZE')) {
+      size1d = parseInt(line.split(/\s+/)[1] ?? '', 10)
+      if (isNaN(size1d)) size1d = 0
+      continue
+    }
+    if (up.startsWith('DOMAIN_MIN')) {
+      const nums = line.split(/\s+/).slice(1).map(parseFloat)
+      for (let i = 0; i < 3 && i < nums.length; i++) if (!isNaN(nums[i])) domainMin[i] = nums[i]
+      continue
+    }
+    if (up.startsWith('DOMAIN_MAX')) {
+      const nums = line.split(/\s+/).slice(1).map(parseFloat)
+      for (let i = 0; i < 3 && i < nums.length; i++) if (!isNaN(nums[i])) domainMax[i] = nums[i]
+      continue
+    }
+    if (up.startsWith('LUT_3D_INPUT_RANGE')) {
+      const nums = line.split(/\s+/).slice(1).map(parseFloat)
+      if (nums.length >= 2 && !isNaN(nums[0]) && !isNaN(nums[1])) {
+        inputLine = 0
+        // 部分文件用这两个数表达 RANGE，这里记录后由 domain 兜底
+        if (domainMin[0] === 0 && domainMax[0] === 1 && (nums[0] !== 0 || nums[1] !== 1)) {
+          for (let i = 0; i < 3; i++) {
+            domainMin[i] = nums[0]
+            domainMax[i] = nums[1]
+          }
+        }
+      }
+      continue
+    }
+    if (up === '') continue
+
+    const toks = line.split(/\s+/).filter(Boolean).map(parseFloat)
+    if (toks.length >= 3 && toks.slice(0, 3).every((t) => !isNaN(t))) {
+      values.push(toks[0], toks[1], toks[2])
+    }
+  }
+
+  void inputLine
+
+  // 标准 .cube 数据为 0..1；若文件本身已是 0..255 则原样保留
+  const scale255 = values.some((v) => v > 1.001) ? 1 : 255
+
+  if (size3d > 0 && values.length > 0) {
+    const need = size3d * size3d * size3d
+    if (values.length >= need) {
+      return makeCubeParam(title, { size: size3d, type: '3d', data: values.slice(0, need).map((v) => v * scale255), domainMin, domainMax })
+    }
+    // 数据不完整：不足则无法可靠填充，视为无效
+    throw new Error(`3D LUT 数据不完整（需要 ${need} 个点，实际 ${Math.floor(values.length / 3)} 个）`)
+  }
+
+  if (size1d > 0 && values.length > 0) {
+    const need = size1d * 3
+    if (values.length >= need) {
+      return makeCubeParam(title, { size: size1d, type: '1d', data: values.slice(0, need).map((v) => v * scale255), domainMin, domainMax })
+    }
+    throw new Error(`1D LUT 数据不完整（需要 ${need} 个值，实际 ${values.length} 个）`)
+  }
+
+  throw new Error('无法识别该 LUT 文件：缺少 LUT_3D_SIZE 或 LUT_1D_SIZE 数据')
+}
+
+function makeCubeParam(name: string, cube: ImportedLut): LutParams {
+  return {
+    id: `import-${Date.now().toString(36)}`,
+    name,
+    exposure: 1,
+    temperature: 0,
+    contrast: 1,
+    saturation: 1,
+    lift: 0,
+    highlightCompression: 0,
+    splitToning: 0,
+    grain: 0,
+    vignette: 0,
+    cubeLut: cube
+  }
 }

@@ -35,6 +35,19 @@ export interface LutParams {
   grain?: number
   /** 暗角强度 0..1 */
   vignette?: number
+  /** 导入的 LUT 网格（.cube 文件）。存在时优先走查表，参数化调色将被忽略 */
+  cubeLut?: ImportedLut
+}
+
+/** 导入的 .cube LUT 数据（值域 0..255） */
+export interface ImportedLut {
+  /** 网格边长；1D 时为曲线点数 */
+  size: number
+  type: '3d' | '1d'
+  /** 3D：size^3 * 3（顺序 R 外层 → G → B 内层）；1D：size * 3 */
+  data: number[]
+  domainMin: [number, number, number]
+  domainMax: [number, number, number]
 }
 
 /** 一次拍摄及其参数 */
